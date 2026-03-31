@@ -31,8 +31,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 #  ⚙️  SOZLAMALAR — BU YERNI TO'LDIRING
 # ════════════════════════════════════════════════════════
 
-BOT_TOKEN   = "8627453491:AAFxYm7xrC2iU4BYn_xLZMEqhozrSjV_hoc"   # @BotFather dan oling
-ADMIN_IDS   = [7399101034]         # Sizning Telegram ID (@userinfobot dan bilib olasiz)
+BOT_TOKEN   = "8627453491:AAGjD7R7_bMsnHJbnJuLjZ-rSVhlE06jX3U"
+ADMIN_IDS   = [7399101034]
 DB_PATH     = "bar.db"
 CURRENCY    = "so'm"
 
@@ -544,4 +544,7 @@ async def info(msg: Message):
 
 def admin_only(func):
     async def wrapper(msg_or_cb, *args, **kwargs):
-        uid = msg_or_cb.from_user.id if hasattr(msg_or_cb, 'from_user') els
+        uid = msg_or_cb.from_user.id
+        if not is_admin(uid):
+            if isinstance(msg_or_cb, Message):
+               
