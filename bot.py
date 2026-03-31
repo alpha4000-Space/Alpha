@@ -19,7 +19,7 @@ from telegram.ext import (
 )
 
 # ===================== SOZLAMALAR =====================
-BOT_TOKEN = "8627453491:AAFgKPUgHdhhtNK3bX5SkhRUirQFUwa2kdI"  # @BotFather dan olingan token
+BOT_TOKEN = "8627453491:AAGe6GEudXrUj1KomGAVxcSGx7NgEuYn_f0"  # @BotFather dan olingan token
 ADMIN_IDS = [7399101034]  # Admin Telegram ID raqamlari
 
 # ===================== MENYU =====================
