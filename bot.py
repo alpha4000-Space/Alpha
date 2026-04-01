@@ -502,8 +502,18 @@ def main():
     app.add_handler(edit_conv)
 
     # Foydalanuvchi handlerlari
-    app.add_handler(CallbackQueryHandler(show_menu,  pattern="^menu_(kalyan|ichimlik)$"))
-    app.add_handler(CallbackQueryHandler(item_info,  pattern=r"^info_(kalyan|ichimlik)_\d+$"))
-    app.add_handler(CallbackQueryHandler(order_item, pattern=r"^order_(kalyan|ichimlik)_\d+$"))
-    app.add_handler(CallbackQueryHandler(my_orders,  pattern="^my_orders$"))
-    app.add_handler(CallbackQueryHandler(start,      patter
+app.add_handler(CallbackQueryHandler(show_menu,  pattern="^menu_(kalyan|ichimlik)$"))
+app.add_handler(CallbackQueryHandler(item_info,  pattern=r"^info_(kalyan|ichimlik)_\d+$"))
+app.add_handler(CallbackQueryHandler(order_item, pattern=r"^order_(kalyan|ichimlik)_\d+$"))
+app.add_handler(CallbackQueryHandler(my_orders,  pattern="^my_orders$"))
+app.add_handler(CallbackQueryHandler(start,      pattern="^back_main$"))
+
+# Qo‘shimcha admin handlerlari bo‘lsa shu yerga qo‘shiladi
+# masalan: admin_del_start, del_show_list, del_item, admin_orders, admin_viewmenu
+
+# Botni ishga tushirish
+app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
