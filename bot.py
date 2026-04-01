@@ -1,531 +1,509 @@
-import asyncio
 import logging
-import json
-import aiosqlite
-from aiogram import Bot, Dispatcher, Router, F
-from aiogram.filters import CommandStart
-from aiogram.types import (
-    Message, CallbackQuery,
-    ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, filters, ContextTypes, ConversationHandler
 )
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-BOT_TOKEN = "8627453491:AAGjD7R7_bMsnHJbnJuLjZ-rSVhlE06jX3U"
-ADMIN_IDS = [7399101034]
-DB_PATH   = "bar.db"
-CURRENCY  = "so'm"
+# ======================== SOZLAMALAR ========================
+BOT_TOKEN = "8627453491:AAGD5x-mPkxhWdbTWwkn53GxGEPjny_ouvY"
+ADMIN_ID = 7399101034  # O'zingizning Telegram ID (@userinfobot dan bilib oling)
 
-# ==============================================================
-# DATABASE
-# ==============================================================
+logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.executescript("""
-            CREATE TABLE IF NOT EXISTS categories (
-                id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                name      TEXT NOT NULL UNIQUE,
-                emoji     TEXT DEFAULT '🍹',
-                is_active INTEGER DEFAULT 1
-            );
-            CREATE TABLE IF NOT EXISTS drinks (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                category_id  INTEGER NOT NULL,
-                name         TEXT NOT NULL,
-                description  TEXT DEFAULT '',
-                price        INTEGER NOT NULL,
-                is_available INTEGER DEFAULT 1
-            );
-            CREATE TABLE IF NOT EXISTS orders (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id      INTEGER NOT NULL,
-                username     TEXT,
-                table_number TEXT,
-                items        TEXT NOT NULL,
-                total_price  INTEGER NOT NULL,
-                status       TEXT DEFAULT 'new',
-                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        for name, emoji in [("Kokteylar","🍹"),("Vino","🍷"),("Pivo","🍺"),("Viski","🥃"),("Alkogolsiz","🧃")]:
-            await db.execute("INSERT OR IGNORE INTO categories (name,emoji) VALUES (?,?)", (name, emoji))
-        await db.commit()
+# ======================== HOLATLAR ========================
+ADD_CAT, ADD_NAME, ADD_PRICE, ADD_DESC = range(4)
+EDIT_LIST, EDIT_CHOOSE_FIELD, EDIT_NAME, EDIT_PRICE, EDIT_DESC = range(4, 9)
 
-async def db_fetchall(q, p=()):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(q, p) as cur:
-            return [dict(r) for r in await cur.fetchall()]
+# ======================== MA'LUMOTLAR ========================
+kalyanlar = [
+    {"id": 1, "name": "Classic Mix",   "price": 80000, "desc": "Klassik aralashma, engil"},
+    {"id": 2, "name": "Double Apple",  "price": 90000, "desc": "Ikki olma aromati"},
+    {"id": 3, "name": "Mint Fresh",    "price": 85000, "desc": "Yashil nane, salqin"},
+]
+ichimliklar = [
+    {"id": 1, "name": "Mojito",    "price": 35000, "desc": "Nane va limon bilan"},
+    {"id": 2, "name": "Limonad",   "price": 20000, "desc": "Uy usulida tayyorlangan"},
+    {"id": 3, "name": "Qora choy", "price": 15000, "desc": "Issiq, shirinlik bilan"},
+]
+orders = []
+next_k_id = 4
+next_i_id = 4
 
-async def db_fetchone(q, p=()):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(q, p) as cur:
-            r = await cur.fetchone()
-            return dict(r) if r else None
 
-async def db_exec(q, p=()):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(q, p)
-        await db.commit()
-        return cur.lastrowid
+def get_list(cat):
+    return kalyanlar if cat == "kalyan" else ichimliklar
 
-async def get_categories(active_only=True):
-    q = "SELECT * FROM categories" + (" WHERE is_active=1" if active_only else "") + " ORDER BY id"
-    return await db_fetchall(q)
+def get_item(cat, item_id):
+    return next((x for x in get_list(cat) if x["id"] == item_id), None)
 
-async def add_category(name, emoji):
+
+# ======================== FOYDALANUVCHI ========================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    kb = [
+        [InlineKeyboardButton("💨 Kalyanlar",     callback_data="menu_kalyan")],
+        [InlineKeyboardButton("🍹 Ichimliklar",   callback_data="menu_ichimlik")],
+        [InlineKeyboardButton("📋 Buyurtmalarim", callback_data="my_orders")],
+    ]
+    text = "🌿 *Kalyan Bar*'ga xush kelibsiz!\n\nQuyidagi bo'limdan birini tanlang:"
+    if update.message:
+        await update.message.reply_text(text, parse_mode="Markdown",
+                                        reply_markup=InlineKeyboardMarkup(kb))
+    else:
+        await update.callback_query.edit_message_text(text, parse_mode="Markdown",
+                                                       reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    cat = query.data.split("_")[1]
+    lst = get_list(cat)
+    emoji = "💨" if cat == "kalyan" else "🍹"
+    title = "Kalyanlar" if cat == "kalyan" else "Ichimliklar"
+
+    if not lst:
+        kb = [[InlineKeyboardButton("🔙 Orqaga", callback_data="back_main")]]
+        await query.edit_message_text("Hozircha bo'sh.", reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    kb = [[InlineKeyboardButton(f"{emoji} {x['name']} — {x['price']:,} so'm",
+                                 callback_data=f"info_{cat}_{x['id']}")] for x in lst]
+    kb.append([InlineKeyboardButton("🔙 Orqaga", callback_data="back_main")])
+    await query.edit_message_text(f"{emoji} *{title}:*\n\nBirini tanlang:",
+                                   parse_mode="Markdown",
+                                   reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def item_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, cat, item_id = query.data.split("_")
+    item = get_item(cat, int(item_id))
+    if not item:
+        await query.edit_message_text("Topilmadi.")
+        return
+
+    emoji = "💨" if cat == "kalyan" else "🍹"
+    kb = [
+        [InlineKeyboardButton("✅ Buyurtma qilish", callback_data=f"order_{cat}_{item_id}")],
+        [InlineKeyboardButton("🔙 Orqaga", callback_data=f"menu_{cat}")],
+    ]
+    await query.edit_message_text(
+        f"{emoji} *{item['name']}*\n\n📝 {item['desc']}\n💰 Narx: *{item['price']:,} so'm*",
+        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb)
+    )
+
+
+async def order_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, cat, item_id = query.data.split("_")
+    item = get_item(cat, int(item_id))
+    if not item:
+        await query.edit_message_text("Topilmadi.")
+        return
+
+    user = query.from_user
+    order = {
+        "id": len(orders) + 1,
+        "user_id": user.id,
+        "username": user.username or user.first_name,
+        "cat": "Kalyan" if cat == "kalyan" else "Ichimlik",
+        "name": item["name"],
+        "price": item["price"],
+        "status": "⏳ Kutilmoqda",
+    }
+    orders.append(order)
+
     try:
-        await db_exec("INSERT INTO categories (name,emoji) VALUES (?,?)", (name, emoji))
-        return True
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=(
+                f"🔔 *Yangi buyurtma!*\n\n"
+                f"👤 Mijoz: @{order['username']} (ID: {user.id})\n"
+                f"📦 Tur: {order['cat']}\n"
+                f"🔖 Nomi: {order['name']}\n"
+                f"💰 Narx: {order['price']:,} so'm\n"
+                f"🆔 Buyurtma №{order['id']}"
+            ),
+            parse_mode="Markdown"
+        )
     except Exception:
-        return False
+        pass
 
-async def delete_category(cid):
-    await db_exec("DELETE FROM drinks WHERE category_id=?", (cid,))
-    await db_exec("DELETE FROM categories WHERE id=?", (cid,))
-
-async def toggle_category(cid):
-    await db_exec("UPDATE categories SET is_active=CASE WHEN is_active=1 THEN 0 ELSE 1 END WHERE id=?", (cid,))
-
-async def get_drinks(category_id, available_only=True):
-    q = "SELECT * FROM drinks WHERE category_id=?" + (" AND is_available=1" if available_only else "") + " ORDER BY id"
-    return await db_fetchall(q, (category_id,))
-
-async def get_all_drinks():
-    return await db_fetchall(
-        "SELECT d.*, c.name cat_name, c.emoji cat_emoji FROM drinks d "
-        "JOIN categories c ON d.category_id=c.id ORDER BY c.id, d.id"
+    kb = [[InlineKeyboardButton("🔙 Bosh menyuga", callback_data="back_main")]]
+    await query.edit_message_text(
+        f"✅ *Buyurtmangiz qabul qilindi!*\n\n"
+        f"📦 {order['cat']}: {order['name']}\n"
+        f"💰 {order['price']:,} so'm\n\n"
+        f"Tez orada xizmat ko'rsatiladi! 🙏",
+        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb)
     )
 
-async def get_drink(did):
-    return await db_fetchone("SELECT * FROM drinks WHERE id=?", (did,))
 
-async def add_drink(category_id, name, description, price):
-    await db_exec("INSERT INTO drinks (category_id,name,description,price) VALUES (?,?,?,?)",
-                  (category_id, name, description, price))
+async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_orders = [o for o in orders if o["user_id"] == query.from_user.id]
 
-async def update_drink_price(did, price):
-    await db_exec("UPDATE drinks SET price=? WHERE id=?", (price, did))
-
-async def update_drink_name(did, name):
-    await db_exec("UPDATE drinks SET name=? WHERE id=?", (name, did))
-
-async def update_drink_desc(did, desc):
-    await db_exec("UPDATE drinks SET description=? WHERE id=?", (desc, did))
-
-async def delete_drink(did):
-    await db_exec("DELETE FROM drinks WHERE id=?", (did,))
-
-async def toggle_drink(did):
-    await db_exec("UPDATE drinks SET is_available=CASE WHEN is_available=1 THEN 0 ELSE 1 END WHERE id=?", (did,))
-
-async def create_order(user_id, username, table_number, items_dict, total):
-    return await db_exec(
-        "INSERT INTO orders (user_id,username,table_number,items,total_price) VALUES (?,?,?,?,?)",
-        (user_id, username, table_number, json.dumps(items_dict, ensure_ascii=False), total)
-    )
-
-async def get_orders(status=None):
-    if status:
-        return await db_fetchall("SELECT * FROM orders WHERE status=? ORDER BY id DESC LIMIT 30", (status,))
-    return await db_fetchall("SELECT * FROM orders ORDER BY id DESC LIMIT 30")
-
-async def set_order_status(oid, status):
-    await db_exec("UPDATE orders SET status=? WHERE id=?", (status, oid))
-
-async def get_stats():
-    total   = (await db_fetchone("SELECT COUNT(*) c FROM orders"))["c"]
-    new     = (await db_fetchone("SELECT COUNT(*) c FROM orders WHERE status='new'"))["c"]
-    done    = (await db_fetchone("SELECT COUNT(*) c FROM orders WHERE status='done'"))["c"]
-    revenue = (await db_fetchone("SELECT COALESCE(SUM(total_price),0) c FROM orders WHERE status='done'"))["c"]
-    drinks  = (await db_fetchone("SELECT COUNT(*) c FROM drinks WHERE is_available=1"))["c"]
-    return total, new, done, revenue, drinks
-
-# ==============================================================
-# KLAVIATURALAR
-# ==============================================================
-
-def kb_main():
-    return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="🍹 Menyu"),       KeyboardButton(text="🛒 Savatcha")],
-        [KeyboardButton(text="📋 Buyurtmalarim"), KeyboardButton(text="ℹ️ Ma'lumot")],
-    ], resize_keyboard=True)
-
-def kb_admin():
-    return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="📊 Statistika"),    KeyboardButton(text="🍹 Ichimliklar")],
-        [KeyboardButton(text="📁 Kategoriyalar"), KeyboardButton(text="📦 Buyurtmalar")],
-        [KeyboardButton(text="👤 Foydalanuvchi rejimi")],
-    ], resize_keyboard=True)
-
-def kb_cats(cats):
-    b = InlineKeyboardBuilder()
-    for c in cats:
-        b.button(text=f"{c['emoji']} {c['name']}", callback_data=f"cat:{c['id']}")
-    b.adjust(2)
-    return b.as_markup()
-
-def kb_drinks_list(drinks):
-    b = InlineKeyboardBuilder()
-    for d in drinks:
-        b.button(text=f"{d['name']} — {d['price']:,} {CURRENCY}", callback_data=f"drink:{d['id']}")
-    b.button(text="⬅️ Kategoriyalar", callback_data="back:cats")
-    b.adjust(1)
-    return b.as_markup()
-
-def kb_drink_detail(did):
-    b = InlineKeyboardBuilder()
-    b.button(text="🛒 Savatga qo'shish", callback_data=f"add:{did}")
-    b.button(text="⬅️ Orqaga",           callback_data="back:cats")
-    b.adjust(1)
-    return b.as_markup()
-
-def kb_cart(has_items):
-    b = InlineKeyboardBuilder()
-    if has_items:
-        b.button(text="✅ Buyurtma berish", callback_data="checkout")
-        b.button(text="🗑 Tozalash",        callback_data="clear_cart")
-    b.button(text="🍹 Menyuga", callback_data="back:cats")
-    b.adjust(1)
-    return b.as_markup()
-
-def kb_confirm():
-    b = InlineKeyboardBuilder()
-    b.button(text="✅ Tasdiqlash", callback_data="confirm_order")
-    b.button(text="❌ Bekor",      callback_data="cancel_order")
-    b.adjust(2)
-    return b.as_markup()
-
-def kb_order_admin(oid):
-    b = InlineKeyboardBuilder()
-    b.button(text="✅ Bajarildi",     callback_data=f"ord:done:{oid}")
-    b.button(text="🚫 Bekor qilish", callback_data=f"ord:cancel:{oid}")
-    b.adjust(2)
-    return b.as_markup()
-
-def kb_admin_cats(cats):
-    b = InlineKeyboardBuilder()
-    for c in cats:
-        ico = "✅" if c["is_active"] else "❌"
-        b.button(text=f"{ico} {c['emoji']} {c['name']}", callback_data=f"ac:{c['id']}")
-    b.button(text="➕ Yangi kategoriya", callback_data="ac:new")
-    b.adjust(1)
-    return b.as_markup()
-
-def kb_admin_cat_detail(cid):
-    b = InlineKeyboardBuilder()
-    b.button(text="🔄 Yoq/Yoqish", callback_data=f"acat:toggle:{cid}")
-    b.button(text="🗑 O'chirish",   callback_data=f"acat:del:{cid}")
-    b.button(text="⬅️ Orqaga",      callback_data="acat:back")
-    b.adjust(2)
-    return b.as_markup()
-
-def kb_admin_drinks_list(drinks):
-    b = InlineKeyboardBuilder()
-    for d in drinks:
-        ico = "✅" if d["is_available"] else "❌"
-        b.button(text=f"{ico} {d['name']} ({d['cat_name']}) — {d['price']:,}", callback_data=f"ad:{d['id']}")
-    b.button(text="➕ Yangi ichimlik", callback_data="ad:new")
-    b.button(text="⬅️ Orqaga",         callback_data="adm:back")
-    b.adjust(1)
-    return b.as_markup()
-
-def kb_admin_drink_detail(did, is_avail):
-    b = InlineKeyboardBuilder()
-    toggle_text = "🔴 O'chirish" if is_avail else "🟢 Yoqish"
-    b.button(text=toggle_text,               callback_data=f"adm_d:toggle:{did}")
-    b.button(text="💰 Narx o'zgartir",       callback_data=f"adm_d:price:{did}")
-    b.button(text="✏️ Nom o'zgartir",        callback_data=f"adm_d:name:{did}")
-    b.button(text="📝 Tavsif o'zgartir",     callback_data=f"adm_d:desc:{did}")
-    b.button(text="🗑 O'chirish",            callback_data=f"adm_d:del:{did}")
-    b.button(text="⬅️ Orqaga",               callback_data="ad:back")
-    b.adjust(2)
-    return b.as_markup()
-
-def kb_new_drink_cats(cats):
-    b = InlineKeyboardBuilder()
-    for c in cats:
-        b.button(text=f"{c['emoji']} {c['name']}", callback_data=f"newdrink_cat:{c['id']}")
-    b.adjust(2)
-    return b.as_markup()
-
-def kb_orders_filter():
-    b = InlineKeyboardBuilder()
-    b.button(text="🆕 Yangi",      callback_data="orders:new")
-    b.button(text="✅ Bajarilgan", callback_data="orders:done")
-    b.button(text="🚫 Bekor",      callback_data="orders:cancel")
-    b.button(text="📋 Hammasi",    callback_data="orders:all")
-    b.adjust(2)
-    return b.as_markup()
-
-# ==============================================================
-# FSM STATES
-# ==============================================================
-
-class OrderForm(StatesGroup):
-    table = State()
-
-class AddDrink(StatesGroup):
-    cat   = State()
-    name  = State()
-    desc  = State()
-    price = State()
-
-class AddCat(StatesGroup):
-    name  = State()
-    emoji = State()
-
-class EditDrink(StatesGroup):
-    price = State()
-    name  = State()
-    desc  = State()
-
-# ==============================================================
-# HELPERS
-# ==============================================================
-
-router = Router()
-
-def is_admin(uid):
-    return uid in ADMIN_IDS
-
-def fp(price):
-    return f"{price:,} {CURRENCY}"
-
-def cart_text(cart):
-    if not cart:
-        return "🛒 Savatcha bo'sh"
-    lines = ["🛒 <b>Savatchadagi ichimliklar:</b>\n"]
-    total = 0
-    for name, (price, qty) in cart.items():
-        lines.append(f"• {name} x{qty} = {fp(price * qty)}")
-        total += price * qty
-    lines.append(f"\n💰 <b>Jami: {fp(total)}</b>")
-    return "\n".join(lines)
-
-# ==============================================================
-# /start
-# ==============================================================
-
-@router.message(CommandStart())
-async def cmd_start(msg: Message, state: FSMContext):
-    await state.clear()
-    name = msg.from_user.first_name
-    if is_admin(msg.from_user.id):
-        await msg.answer(
-            f"👑 Xush kelibsiz, Admin <b>{name}</b>!\nAdmin paneliga xush kelibsiz.",
-            reply_markup=kb_admin(), parse_mode="HTML"
-        )
+    if not user_orders:
+        text = "📋 Sizda hali buyurtma yo'q.\n\nMenyudan biror narsa tanlang!"
     else:
-        await msg.answer(
-            f"🍸 Xush kelibsiz, <b>{name}</b>!\nMenyuni ko'rish uchun <b>🍹 Menyu</b> tugmasini bosing.",
-            reply_markup=kb_main(), parse_mode="HTML"
-        )
+        lines = ["📋 *Sizning buyurtmalaringiz:*\n"]
+        for o in user_orders:
+            lines.append(f"№{o['id']} | {o['cat']} | {o['name']} | {o['price']:,} so'm | {o['status']}")
+        text = "\n".join(lines)
 
-# ==============================================================
-# FOYDALANUVCHI — MENYU
-# ==============================================================
+    kb = [[InlineKeyboardButton("🔙 Bosh menyuga", callback_data="back_main")]]
+    await query.edit_message_text(text, parse_mode="Markdown",
+                                   reply_markup=InlineKeyboardMarkup(kb))
 
-@router.message(F.text == "🍹 Menyu")
-async def show_menu(msg: Message):
-    cats = await get_categories(active_only=True)
-    if not cats:
-        await msg.answer("😔 Hozircha menyu mavjud emas.")
+
+# ======================== ADMIN ========================
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Sizda ruxsat yo'q.")
         return
-    await msg.answer("🍸 <b>Kategoriyani tanlang:</b>", reply_markup=kb_cats(cats), parse_mode="HTML")
+    kb = [
+        [InlineKeyboardButton("➕ Qo'shish",        callback_data="admin_add")],
+        [InlineKeyboardButton("✏️ Tahrirlash",      callback_data="admin_edit")],
+        [InlineKeyboardButton("❌ O'chirish",        callback_data="admin_del")],
+        [InlineKeyboardButton("📋 Buyurtmalar",     callback_data="admin_orders")],
+        [InlineKeyboardButton("🗂 Menyuni ko'rish",  callback_data="admin_viewmenu")],
+    ]
+    await update.message.reply_text("⚙️ *Admin panel*\n\nNimani qilmoqchisiz?",
+                                     parse_mode="Markdown",
+                                     reply_markup=InlineKeyboardMarkup(kb))
 
-@router.callback_query(F.data.startswith("cat:"))
-async def show_category(cb: CallbackQuery):
-    cid = int(cb.data.split(":")[1])
-    drinks = await get_drinks(cid, available_only=True)
-    if not drinks:
-        await cb.answer("Bu kategoriyada ichimlik yo'q", show_alert=True)
-        return
-    await cb.message.edit_text("🍹 <b>Ichimlikni tanlang:</b>", reply_markup=kb_drinks_list(drinks), parse_mode="HTML")
 
-@router.callback_query(F.data.startswith("drink:"))
-async def show_drink(cb: CallbackQuery):
-    did = int(cb.data.split(":")[1])
-    d = await get_drink(did)
-    if not d:
-        await cb.answer("Topilmadi", show_alert=True)
-        return
-    text = (
-        f"🍹 <b>{d['name']}</b>\n\n"
-        f"📝 {d['description'] or 'Tavsif yoq'}\n\n"
-        f"💰 Narxi: <b>{fp(d['price'])}</b>"
-    )
-    await cb.message.edit_text(text, reply_markup=kb_drink_detail(did), parse_mode="HTML")
+# --- QO'SHISH ---
 
-@router.callback_query(F.data.startswith("add:"))
-async def add_to_cart(cb: CallbackQuery, state: FSMContext):
-    did = int(cb.data.split(":")[1])
-    d = await get_drink(did)
-    if not d:
-        await cb.answer("Topilmadi", show_alert=True)
-        return
-    data = await state.get_data()
-    cart = data.get("cart", {})
-    key = d["name"]
-    if key in cart:
-        cart[key] = (cart[key][0], cart[key][1] + 1)
+async def admin_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.clear()
+    kb = [
+        [InlineKeyboardButton("💨 Kalyan",   callback_data="cat_kalyan")],
+        [InlineKeyboardButton("🍹 Ichimlik", callback_data="cat_ichimlik")],
+    ]
+    await query.edit_message_text("➕ *Qaysi turga qo'shmoqchisiz?*",
+                                   parse_mode="Markdown",
+                                   reply_markup=InlineKeyboardMarkup(kb))
+    return ADD_CAT
+
+
+async def add_choose_cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["add_cat"] = query.data.split("_")[1]
+    await query.edit_message_text("📝 Nomini kiriting:")
+    return ADD_NAME
+
+
+async def add_get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["add_name"] = update.message.text.strip()
+    await update.message.reply_text("💰 Narxini kiriting (faqat raqam):\nMasalan: 50000")
+    return ADD_PRICE
+
+
+async def add_get_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().replace(" ", "").replace(",", "")
+    if not text.isdigit():
+        await update.message.reply_text("❌ Faqat raqam kiriting! Qayta urining:")
+        return ADD_PRICE
+    context.user_data["add_price"] = int(text)
+    await update.message.reply_text("📄 Qisqacha tavsif kiriting:")
+    return ADD_DESC
+
+
+async def add_get_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global next_k_id, next_i_id
+    cat   = context.user_data["add_cat"]
+    name  = context.user_data["add_name"]
+    price = context.user_data["add_price"]
+    desc  = update.message.text.strip()
+
+    if cat == "kalyan":
+        kalyanlar.append({"id": next_k_id, "name": name, "price": price, "desc": desc})
+        next_k_id += 1
     else:
-        cart[key] = (d["price"], 1)
-    await state.update_data(cart=cart)
-    await cb.answer(f"✅ {d['name']} savatga qoshildi!")
+        ichimliklar.append({"id": next_i_id, "name": name, "price": price, "desc": desc})
+        next_i_id += 1
 
-@router.callback_query(F.data == "back:cats")
-async def back_to_cats(cb: CallbackQuery):
-    cats = await get_categories(active_only=True)
-    await cb.message.edit_text("🍸 <b>Kategoriyani tanlang:</b>", reply_markup=kb_cats(cats), parse_mode="HTML")
+    label = "Kalyan" if cat == "kalyan" else "Ichimlik"
+    await update.message.reply_text(
+        f"✅ *{label}* menyuga qo'shildi!\n🔖 {name}\n💰 {price:,} so'm\n📝 {desc}",
+        parse_mode="Markdown"
+    )
+    return ConversationHandler.END
 
-# ==============================================================
-# SAVATCHA
-# ==============================================================
 
-@router.message(F.text == "🛒 Savatcha")
-async def show_cart(msg: Message, state: FSMContext):
-    data = await state.get_data()
-    cart = data.get("cart", {})
-    await msg.answer(cart_text(cart), reply_markup=kb_cart(bool(cart)), parse_mode="HTML")
+# --- TAHRIRLASH ---
 
-@router.callback_query(F.data == "clear_cart")
-async def clear_cart(cb: CallbackQuery, state: FSMContext):
-    await state.update_data(cart={})
-    await cb.message.edit_text("🗑 Savatcha tozalandi.", reply_markup=kb_cart(False))
+async def admin_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.clear()
+    kb = [
+        [InlineKeyboardButton("💨 Kalyanlar",   callback_data="ecat_kalyan")],
+        [InlineKeyboardButton("🍹 Ichimliklar", callback_data="ecat_ichimlik")],
+        [InlineKeyboardButton("🔙 Bekor",       callback_data="cancel_conv")],
+    ]
+    await query.edit_message_text("✏️ *Qaysi turni tahrirlash?*",
+                                   parse_mode="Markdown",
+                                   reply_markup=InlineKeyboardMarkup(kb))
+    return EDIT_LIST
 
-@router.callback_query(F.data == "checkout")
-async def checkout(cb: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    if not data.get("cart"):
-        await cb.answer("Savatcha bosh!", show_alert=True)
+
+async def edit_show_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    cat = query.data.split("_")[1]
+    context.user_data["edit_cat"] = cat
+    lst = get_list(cat)
+
+    if not lst:
+        await query.edit_message_text("Bo'sh.")
+        return ConversationHandler.END
+
+    kb = [[InlineKeyboardButton(f"{x['name']} — {x['price']:,} so'm",
+                                 callback_data=f"eid_{x['id']}")] for x in lst]
+    kb.append([InlineKeyboardButton("🔙 Bekor", callback_data="cancel_conv")])
+    await query.edit_message_text("✏️ Qaysi elementni tahrirlash?",
+                                   reply_markup=InlineKeyboardMarkup(kb))
+    return EDIT_LIST
+
+
+async def edit_choose_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    item_id = int(query.data.split("_")[1])
+    cat = context.user_data["edit_cat"]
+    item = get_item(cat, item_id)
+    if not item:
+        await query.edit_message_text("Topilmadi.")
+        return ConversationHandler.END
+
+    context.user_data["edit_id"] = item_id
+    kb = [
+        [InlineKeyboardButton("📝 Nomini o'zgartir",    callback_data="ef_name")],
+        [InlineKeyboardButton("💰 Narxini o'zgartir",   callback_data="ef_price")],
+        [InlineKeyboardButton("📄 Tavsifini o'zgartir", callback_data="ef_desc")],
+        [InlineKeyboardButton("🔙 Bekor",               callback_data="cancel_conv")],
+    ]
+    await query.edit_message_text(
+        f"✏️ *{item['name']}*\n💰 {item['price']:,} so'm\n📝 {item['desc']}\n\nNimani o'zgartirish?",
+        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb)
+    )
+    return EDIT_CHOOSE_FIELD
+
+
+async def edit_choose_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    field = query.data.split("_")[1]
+    context.user_data["edit_field"] = field
+    prompts = {
+        "name":  "📝 Yangi nomni kiriting:",
+        "price": "💰 Yangi narxni kiriting (faqat raqam):",
+        "desc":  "📄 Yangi tavsifni kiriting:"
+    }
+    await query.edit_message_text(prompts[field])
+    return {"name": EDIT_NAME, "price": EDIT_PRICE, "desc": EDIT_DESC}[field]
+
+
+async def edit_save_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    item = get_item(context.user_data["edit_cat"], context.user_data["edit_id"])
+    old = item["name"]
+    item["name"] = update.message.text.strip()
+    await update.message.reply_text(f"✅ Nom: *{old}* → *{item['name']}*", parse_mode="Markdown")
+    return ConversationHandler.END
+
+
+async def edit_save_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().replace(" ", "").replace(",", "")
+    if not text.isdigit():
+        await update.message.reply_text("❌ Faqat raqam! Qayta kiriting:")
+        return EDIT_PRICE
+    item = get_item(context.user_data["edit_cat"], context.user_data["edit_id"])
+    old = item["price"]
+    item["price"] = int(text)
+    await update.message.reply_text(
+        f"✅ *{item['name']}* narxi: {old:,} → *{item['price']:,} so'm*",
+        parse_mode="Markdown"
+    )
+    return ConversationHandler.END
+
+
+async def edit_save_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    item = get_item(context.user_data["edit_cat"], context.user_data["edit_id"])
+    item["desc"] = update.message.text.strip()
+    await update.message.reply_text(
+        f"✅ *{item['name']}* tavsifi yangilandi:\n📝 {item['desc']}",
+        parse_mode="Markdown"
+    )
+    return ConversationHandler.END
+
+
+# --- O'CHIRISH ---
+
+async def admin_del_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    kb = [
+        [InlineKeyboardButton("💨 Kalyanlar",   callback_data="dcat_kalyan")],
+        [InlineKeyboardButton("🍹 Ichimliklar", callback_data="dcat_ichimlik")],
+        [InlineKeyboardButton("🔙 Bekor",       callback_data="cancel_cb")],
+    ]
+    await query.edit_message_text("❌ *Qaysi turdan o'chirish?*",
+                                   parse_mode="Markdown",
+                                   reply_markup=InlineKeyboardMarkup(kb))
+
+
+async def del_show_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    cat = query.data.split("_")[1]
+    lst = get_list(cat)
+
+    if not lst:
+        await query.edit_message_text("Bo'sh.")
         return
-    await cb.message.answer("🪑 Stol raqamingizni kiriting (masalan: 5):")
-    await state.set_state(OrderForm.table)
 
-@router.message(OrderForm.table)
-async def order_table(msg: Message, state: FSMContext):
-    table = msg.text.strip()
-    await state.update_data(table=table)
-    data = await state.get_data()
-    cart = data.get("cart", {})
-    text = cart_text(cart) + f"\n\n🪑 Stol: <b>{table}</b>\n\nTasdiqlaysizmi?"
-    await msg.answer(text, reply_markup=kb_confirm(), parse_mode="HTML")
+    kb = [[InlineKeyboardButton(f"❌ {x['name']} — {x['price']:,} so'm",
+                                 callback_data=f"ditem_{cat}_{x['id']}")] for x in lst]
+    kb.append([InlineKeyboardButton("🔙 Bekor", callback_data="cancel_cb")])
+    await query.edit_message_text("❌ Qaysi elementni o'chirish?",
+                                   reply_markup=InlineKeyboardMarkup(kb))
 
-@router.callback_query(F.data == "confirm_order")
-async def confirm_order(cb: CallbackQuery, state: FSMContext, bot: Bot):
-    data = await state.get_data()
-    cart = data.get("cart", {})
-    table = data.get("table", "?")
-    if not cart:
-        await cb.answer("Savatcha bosh!", show_alert=True)
+
+async def del_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split("_")
+    cat = parts[1]
+    item_id = int(parts[2])
+    lst = get_list(cat)
+    item = get_item(cat, item_id)
+    if not item:
+        await query.edit_message_text("Topilmadi.")
         return
+    lst.remove(item)
+    await query.edit_message_text(f"✅ *{item['name']}* o'chirildi.", parse_mode="Markdown")
 
-    items_dict = {name: {"price": price, "qty": qty} for name, (price, qty) in cart.items()}
-    total = sum(p * q for p, q in cart.values())
 
-    oid = await create_order(
-        cb.from_user.id,
-        cb.from_user.username or cb.from_user.first_name,
-        table, items_dict, total
-    )
-    await state.update_data(cart={})
+# --- BUYURTMALAR ---
 
-    await cb.message.edit_text(
-        f"✅ <b>Buyurtmangiz qabul qilindi!</b>\n\n"
-        f"📋 Buyurtma #<b>{oid}</b>\n"
-        f"🪑 Stol: {table}\n"
-        f"💰 Jami: {fp(total)}\n\n"
-        f"Tez orada xizmatchi yetib keladi!",
-        parse_mode="HTML"
-    )
+async def admin_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-    lines = [f"🆕 <b>Yangi buyurtma #{oid}</b>\n",
-             f"👤 @{cb.from_user.username or cb.from_user.first_name}",
-             f"🪑 Stol: {table}\n"]
-    for name, v in items_dict.items():
-        lines.append(f"• {name} x{v['qty']} = {fp(v['price'] * v['qty'])}")
-    lines.append(f"\n💰 <b>Jami: {fp(total)}</b>")
-
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(admin_id, "\n".join(lines), reply_markup=kb_order_admin(oid), parse_mode="HTML")
-        except Exception:
-            pass
-
-@router.callback_query(F.data == "cancel_order")
-async def cancel_order_cb(cb: CallbackQuery, state: FSMContext):
-    await state.set_state(None)
-    await cb.message.edit_text("❌ Buyurtma bekor qilindi.")
-
-@router.message(F.text == "📋 Buyurtmalarim")
-async def my_orders(msg: Message):
-    orders = await db_fetchall(
-        "SELECT * FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 10", (msg.from_user.id,)
-    )
     if not orders:
-        await msg.answer("📋 Sizda hali buyurtma yoq.")
+        await query.edit_message_text("Hali buyurtma yo'q.")
         return
-    st_map = {"new": "🆕 Yangi", "done": "✅ Bajarildi", "cancel": "🚫 Bekor"}
-    lines = ["📋 <b>Oxirgi buyurtmalaringiz:</b>\n"]
+
+    lines = ["📋 *Barcha buyurtmalar:*\n"]
     for o in orders:
-        lines.append(f"#{o['id']} | {st_map.get(o['status'], o['status'])} | {fp(o['total_price'])} | Stol: {o['table_number']}")
-    await msg.answer("\n".join(lines), parse_mode="HTML")
+        lines.append(
+            f"№{o['id']} | {o['cat']} | {o['name']} | {o['price']:,} so'm | {o['status']}"
+        )
+    total = sum(o["price"] for o in orders)
+    lines.append(f"\n💰 Jami: *{total:,} so'm*")
 
-@router.message(F.text == "ℹ️ Ma'lumot")
-async def info_handler(msg: Message):
-    await msg.answer(
-        "🍸 <b>Bizning Bar</b>\n\nSifatli ichimliklar va professional xizmat!\n\n📞 Aloqa: @admin",
-        parse_mode="HTML"
+    kb = [[InlineKeyboardButton("🔙 Admin panel", callback_data="cancel_cb")]]
+    await query.edit_message_text("\n".join(lines), parse_mode="Markdown",
+                                   reply_markup=InlineKeyboardMarkup(kb))
+
+
+# --- MENYUNI KO'RISH (admin) ---
+
+async def admin_viewmenu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    lines = ["💨 *Kalyanlar:*\n"]
+    for x in kalyanlar:
+        lines.append(f"• {x['name']} — {x['price']:,} so'm\n  📝 {x['desc']}")
+
+    lines.append("\n🍹 *Ichimliklar:*\n")
+    for x in ichimliklar:
+        lines.append(f"• {x['name']} — {x['price']:,} so'm\n  📝 {x['desc']}")
+
+    kb = [[InlineKeyboardButton("🔙 Admin panel", callback_data="cancel_cb")]]
+    await query.edit_message_text("\n".join(lines), parse_mode="Markdown",
+                                   reply_markup=InlineKeyboardMarkup(kb))
+
+
+# --- BEKOR QILISH ---
+
+async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text("❌ Bekor qilindi.")
+    else:
+        await update.message.reply_text("❌ Bekor qilindi.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("✅ Yopildi. /admin — qayta ochish uchun")
+
+
+# ======================== ASOSIY ========================
+
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    # Qo'shish conversation
+    add_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_add_start, pattern="^admin_add$")],
+        states={
+            ADD_CAT:   [CallbackQueryHandler(add_choose_cat, pattern="^cat_")],
+            ADD_NAME:  [MessageHandler(filters.TEXT & ~filters.COMMAND, add_get_name)],
+            ADD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_get_price)],
+            ADD_DESC:  [MessageHandler(filters.TEXT & ~filters.COMMAND, add_get_desc)],
+        },
+        fallbacks=[
+            CallbackQueryHandler(cancel_conv, pattern="^cancel_conv$"),
+            CommandHandler("cancel", cancel_conv),
+        ]
     )
 
-# ==============================================================
-# ADMIN — STATISTIKA
-# ==============================================================
-
-@router.message(F.text == "📊 Statistika")
-async def admin_stats(msg: Message):
-    if not is_admin(msg.from_user.id):
-        return
-    total, new, done, revenue, drinks = await get_stats()
-    await msg.answer(
-        f"📊 <b>Statistika</b>\n\n"
-        f"📦 Jami buyurtmalar: <b>{total}</b>\n"
-        f"🆕 Yangi: <b>{new}</b>\n"
-        f"✅ Bajarilgan: <b>{done}</b>\n"
-        f"🍹 Aktiv ichimliklar: <b>{drinks}</b>\n\n"
-        f"💰 Jami daromad: <b>{fp(revenue)}</b>",
-        parse_mode="HTML"
+    # Tahrirlash conversation
+    edit_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_edit_start, pattern="^admin_edit$")],
+        states={
+            EDIT_LIST: [
+                CallbackQueryHandler(edit_show_list,   pattern="^ecat_"),
+                CallbackQueryHandler(edit_choose_item, pattern=r"^eid_\d+$"),
+            ],
+            EDIT_CHOOSE_FIELD: [
+                CallbackQueryHandler(edit_choose_field, pattern="^ef_"),
+            ],
+            EDIT_NAME:  [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_save_name)],
+            EDIT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_save_price)],
+            EDIT_DESC:  [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_save_desc)],
+        },
+        fallbacks=[
+            CallbackQueryHandler(cancel_conv, pattern="^cancel_conv$"),
+            CommandHandler("cancel", cancel_conv),
+        ]
     )
 
-@router.message(F.text == "👤 Foydalanuvchi rejimi")
-async def user_mode(msg: Message):
-    if not is_admin(msg.from_user.id):
-        return
-    await msg.answer("👤 Foydalanuvchi rejimi", reply_markup=kb_main())
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(add_conv)
+    app.add_handler(edit_conv)
 
-# ==============================================================
-# ADMIN — KATEGORIYALAR
-# ==============================================================
-
-@router.message(F.text == "📁 Kategoriyalar")
-async def admin_cats_menu(msg: Message):
-    if not is_admin(msg.from_user.id):
-        return
-    cats = await get_categories(active_only=False)
-    await msg.answer(
-        f"📁 <b>Kategoriyalar</b> ({len(cats)} ta)\n\nKategoriyani bosib tahrirlang:",
-        reply_markup=kb_admin_cats(cats), parse_mode="HTML"
-    )
-
-@router.callback_query(F.data.startswith("ac:"))
-async def admin_cat_click(cb: CallbackQuery, state: FSMContext):
-    if not is_admin(cb.from_user.id):
-        return
-    val = cb.data.split(":")[1]
-    if val == "new":
-        await cb.message.answer("📝 Yangi ka
+    # Foydalanuvchi handlerlari
+    app.add_handler(CallbackQueryHandler(show_menu,  pattern="^menu_(kalyan|ichimlik)$"))
+    app.add_handler(CallbackQueryHandler(item_info,  pattern=r"^info_(kalyan|ichimlik)_\d+$"))
+    app.add_handler(CallbackQueryHandler(order_item, pattern=r"^order_(kalyan|ichimlik)_\d+$"))
+    app.add_handler(CallbackQueryHandler(my_orders,  pattern="^my_orders$"))
+    app.add_handler(CallbackQueryHandler(start,      patter
