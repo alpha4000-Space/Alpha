@@ -23,12 +23,12 @@ def build_keyboard() -> InlineKeyboardMarkup:
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
-                text="✅ Accept",
+                text=" Accept",
                 callback_data="action_accept",
                 icon_custom_emoji_id=ACCEPT_EMOJI_ID
             ),
             InlineKeyboardButton(
-                text="❌ Reject",
+                text=" Reject",
                 callback_data="action_reject",
                 icon_custom_emoji_id=REJECT_EMOJI_ID
             ),
