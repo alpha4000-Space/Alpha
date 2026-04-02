@@ -6,7 +6,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 # ===================== CONFIG =====================
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+BOT_TOKEN = "8627453491:AAGD5x-mPkxhWdbTWwkn53GxGEPjny_ouvY"
 
 ACCEPT_EMOJI_ID = "5323765959444435759"
 REJECT_EMOJI_ID = "5325998693898293667"
