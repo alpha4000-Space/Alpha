@@ -1,373 +1,505 @@
-import asyncio
-import logging
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import CommandStart, Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import (
-    InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardMarkup, KeyboardButton,
-    ReplyKeyboardRemove, MessageEntity
-)
-from aiogram.utils.keyboard import InlineKeyboardBuilder
+import telebot
+import requests
+import time
 from datetime import datetime
+import threading
+import json
+import os
+from typing import Dict, List, Optional
 
-# ===================== CONFIG =====================
-BOT_TOKEN = "8627453491:AAGD5x-mPkxhWdbTWwkn53GxGEPjny_ouvY"
-ADMIN_CHAT_ID = 7399101034       # Admin shaxsiy chat ID
-ADMIN_CHANNEL_ID = -100123456789 # Admin kanal ID
+# ==================== KONFIGURATSIYA ====================
+TOKEN = "8734711674:AAFhT5zzQUTxSw0CzcHYLtZEn9kSjgriFTo"  # Tokeningizni shu yerga yozing
+DEFAULT_INTERVAL = 5
+DATA_FILE = "user_data.json"  # Foydalanuvchi ma'lumotlari saqlanadigan fayl
 
-ACCEPT_EMOJI_ID = "5323765959444435759"
-REJECT_EMOJI_ID = "5325998693898293667"
+bot = telebot.TeleBot(TOKEN)
 
-# Crypto kurslar (manual, o'zingiz yangilaysiz)
-RATES = {
-    "BTC":  {"buy": 95000, "sell": 94000},
-    "ETH":  {"buy": 3500,  "sell": 3450},
-    "BNB":  {"buy": 600,   "sell": 590},
-    "SOL":  {"buy": 180,   "sell": 175},
-    "LTC":  {"buy": 120,   "sell": 118},
-    "TON":  {"buy": 5.5,   "sell": 5.3},
-    "TRX":  {"buy": 0.13,  "sell": 0.12},
-    "DOGE": {"buy": 0.18,  "sell": 0.17},
+# Barcha mavjud kripto valyutalar
+ALL_COINS = {
+    "BTC": "BTCUSDT",
+    "ETH": "ETHUSDT",
+    "BNB": "BNBUSDT",
+    "SOL": "SOLUSDT",
+    "LTC": "LTCUSDT",
+    "TON": "TONUSDT",
+    "TRX": "TRXUSDT",
+    "DOGE": "DOGEUSDT",
+    "ADA": "ADAUSDT",
+    "AVAX": "AVAXUSDT",
+    "DOT": "DOTUSDT",
+    "MATIC": "MATICUSDT"
 }
-# ==================================================
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Emoji ID (Premium foydalanuvchi uchun)
+EMOJI_IDS = {
+    "BTC": "5215277894456089919",
+    "ETH": "5215469686220688535",
+    "BNB": "5215501052366852398",
+    "SOL": "5215644439850028163",
+    "LTC": "5215397251597243962",
+    "TON": "5215541953340410399",
+    "TRX": "5215676493190960888",
+    "DOGE": "5215580724010193095"
+}
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+# ==================== FOYDALANUVCHI HOLATI ====================
+class UserState:
+    """Har bir foydalanuvchi uchun holat (state)"""
+    def __init__(self, chat_id: int):
+        self.chat_id = chat_id
+        self.message_id: Optional[int] = None
+        self.active_coins: List[str] = ["BTC", "ETH", "BNB", "SOL"]  # Standart valyutalar
+        self.interval: int = DEFAULT_INTERVAL
+        self.updater_running: bool = True
+        self.updater_thread: Optional[threading.Thread] = None
+        self.waiting_for_coin: bool = False  # Valyuta qo'shish kutilmoqda
+        self.waiting_for_interval: bool = False  # Interval kiritilishi kutilmoqda
 
-# Zayavka storage (oddiy dict, production da DB ishlatiladi)
-orders = {}
-order_counter = 0
+class UserManager:
+    """Barcha foydalanuvchilarni boshqarish"""
+    def __init__(self):
+        self.states: Dict[int, UserState] = {}
+        self.load_data()
+    
+    def get_state(self, chat_id: int) -> UserState:
+        if chat_id not in self.states:
+            self.states[chat_id] = UserState(chat_id)
+        return self.states[chat_id]
+    
+    def save_data(self):
+        """Foydalanuvchi ma'lumotlarini faylga saqlash"""
+        data = {}
+        for chat_id, state in self.states.items():
+            data[chat_id] = {
+                "active_coins": state.active_coins,
+                "interval": state.interval
+            }
+        with open(DATA_FILE, "w") as f:
+            json.dump(data, f)
+    
+    def load_data(self):
+        """Foydalanuvchi ma'lumotlarini fayldan yuklash"""
+        if os.path.exists(DATA_FILE):
+            try:
+                with open(DATA_FILE, "r") as f:
+                    data = json.load(f)
+                    for chat_id_str, info in data.items():
+                        chat_id = int(chat_id_str)
+                        state = UserState(chat_id)
+                        state.active_coins = info["active_coins"]
+                        state.interval = info["interval"]
+                        self.states[chat_id] = state
+            except:
+                pass
 
+user_manager = UserManager()
 
-# ========== FSM STATES ==========
-class OrderState(StatesGroup):
-    choose_direction = State()
-    choose_crypto    = State()
-    enter_amount     = State()
-    enter_wallet     = State()
-    upload_receipt   = State()
-
-
-# ========== KEYBOARDS ==========
-def main_menu():
-    kb = ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="💱 Obmen"), KeyboardButton(text="📊 Kurslar")],
-        [KeyboardButton(text="📋 Tarixim")]
-    ], resize_keyboard=True)
-    return kb
-
-def direction_kb():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🟢 So'm → Crypto", callback_data="dir_buy")],
-        [InlineKeyboardButton(text="🔴 Crypto → So'm", callback_data="dir_sell")],
-    ])
-    return kb
-
-def crypto_kb(direction: str):
-    coins = list(RATES.keys())
-    buttons = []
-    row = []
-    for i, coin in enumerate(coins):
-        row.append(InlineKeyboardButton(text=coin, callback_data=f"coin_{direction}_{coin}"))
-        if len(row) == 4:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    buttons.append([InlineKeyboardButton(text="🔙 Orqaga", callback_data="back_main")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def admin_order_kb(order_id: int):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="✅ Accept",
-                callback_data=f"admin_accept_{order_id}",
-                icon_custom_emoji_id=ACCEPT_EMOJI_ID
-            ),
-            InlineKeyboardButton(
-                text="❌ Reject",
-                callback_data=f"admin_reject_{order_id}",
-                icon_custom_emoji_id=REJECT_EMOJI_ID
-            ),
-        ]
-    ])
-    return keyboard
-
-
-# ========== HANDLERS ==========
-
-@dp.message(CommandStart())
-async def start_handler(message: types.Message, state: FSMContext):
-    await state.clear()
-    await message.answer(
-        "👋 <b>Xush kelibsiz!</b>\n\nCrypto obmen botiga xush kelibsiz. Nima qilmoqchisiz?",
-        parse_mode="HTML",
-        reply_markup=main_menu()
-    )
-
-@dp.message(F.text == "📊 Kurslar")
-async def rates_handler(message: types.Message):
-    text = "📊 <b>Joriy kurslar (USD):</b>\n\n"
-    for coin, rate in RATES.items():
-        text += f"<b>{coin}</b>: Sotib olish ${rate['buy']:,} | Sotish ${rate['sell']:,}\n"
-    await message.answer(text, parse_mode="HTML")
-
-@dp.message(F.text == "📋 Tarixim")
-async def history_handler(message: types.Message):
-    user_id = message.from_user.id
-    user_orders = [o for o in orders.values() if o["user_id"] == user_id]
-    if not user_orders:
-        await message.answer("📋 Sizda hali zayavkalar yo'q.")
-        return
-    text = "📋 <b>Sizning zayavkalaringiz:</b>\n\n"
-    for o in user_orders[-10:]:
-        status_emoji = "⏳" if o["status"] == "pending" else ("✅" if o["status"] == "accepted" else "❌")
-        text += (
-            f"{status_emoji} <b>#{o['id']}</b> | {o['direction']} | {o['crypto']}\n"
-            f"   Miqdor: <code>{o['amount']}</code>\n"
-            f"   Sana: {o['date']}\n\n"
-        )
-    await message.answer(text, parse_mode="HTML")
-
-@dp.message(F.text == "💱 Obmen")
-async def exchange_handler(message: types.Message, state: FSMContext):
-    await state.set_state(OrderState.choose_direction)
-    await message.answer(
-        "💱 <b>Obmen yo'nalishini tanlang:</b>",
-        parse_mode="HTML",
-        reply_markup=direction_kb()
-    )
-
-@dp.callback_query(F.data == "back_main")
-async def back_main(callback: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.message.delete()
-    await callback.message.answer("🏠 Asosiy menyu:", reply_markup=main_menu())
-
-@dp.callback_query(F.data.startswith("dir_"))
-async def choose_direction(callback: types.CallbackQuery, state: FSMContext):
-    direction = callback.data.split("_")[1]  # buy yoki sell
-    label = "So'm → Crypto" if direction == "buy" else "Crypto → So'm"
-    await state.update_data(direction=label, dir_code=direction)
-    await state.set_state(OrderState.choose_crypto)
-    await callback.message.edit_text(
-        f"✅ Yo'nalish: <b>{label}</b>\n\n🪙 Cryptoni tanlang:",
-        parse_mode="HTML",
-        reply_markup=crypto_kb(direction)
-    )
-
-@dp.callback_query(F.data.startswith("coin_"))
-async def choose_crypto(callback: types.CallbackQuery, state: FSMContext):
-    parts = callback.data.split("_")
-    direction = parts[1]
-    coin = parts[2]
-    rate = RATES[coin]["buy"] if direction == "buy" else RATES[coin]["sell"]
-    await state.update_data(crypto=coin, rate=rate)
-    await state.set_state(OrderState.enter_amount)
-    await callback.message.edit_text(
-        f"🪙 <b>{coin}</b> tanlandi\n"
-        f"💵 Kurs: <b>${rate:,}</b>\n\n"
-        f"💰 Miqdorni kiriting (USD da):",
-        parse_mode="HTML"
-    )
-
-@dp.message(OrderState.enter_amount)
-async def enter_amount(message: types.Message, state: FSMContext):
+# ==================== BINANCE API ====================
+def get_prices() -> Dict[str, float]:
+    """Binance'dan barcha narxlarni olish"""
     try:
-        amount = float(message.text.replace(",", "."))
-        if amount <= 0:
-            raise ValueError
-    except ValueError:
-        await message.answer("❗ Iltimos, to'g'ri raqam kiriting. Masalan: <code>100</code>", parse_mode="HTML")
+        r = requests.get("https://api.binance.com/api/v3/ticker/price", timeout=5)
+        r.raise_for_status()
+        data = r.json()
+        prices = {}
+        for item in data:
+            for coin, symbol in ALL_COINS.items():
+                if item["symbol"] == symbol:
+                    prices[coin] = float(item["price"])
+        return prices
+    except requests.RequestException as e:
+        print(f"API xatosi: {e}")
+        return {}
+    except Exception as e:
+        print(f"Kutilmagan xato: {e}")
+        return {}
+
+def build_message(state: UserState, prices: Dict[str, float]) -> str:
+    """Foydalanuvchi tanlagan valyutalar uchun xabar yaratish"""
+    now = datetime.now()
+    t = now.strftime("%H:%M:%S")
+    
+    text = "💰 <b>AlphaCryptoPrice</b>\n"
+    text += f"📅 {now.strftime('%d.%m.%Y')}\n"
+    text += "─" * 20 + "\n\n"
+    
+    for coin in state.active_coins:
+        price = prices.get(coin, 0)
+        emoji_id = EMOJI_IDS.get(coin, "")
+        if emoji_id:
+            icon = f"<tg-emoji emoji-id='{emoji_id}'>🪙</tg-emoji>"
+        else:
+            icon = "🪙"
+        
+        # Narxni formatlash
+        if price >= 1000:
+            price_str = f"${price:,.2f}"
+        elif price >= 1:
+            price_str = f"${price:,.2f}"
+        else:
+            price_str = f"${price:.6f}"
+        
+        text += f"{icon} <b>{coin}</b> → {price_str}\n"
+    
+    text += "\n" + "─" * 20 + "\n"
+    text += f"🕐 Yangilanish: {state.interval} sek\n"
+    text += f"🪙 Faol valyutalar: {len(state.active_coins)} ta\n\n"
+    text += "<i>/menu - Barcha buyruqlar</i>"
+    
+    return text
+
+# ==================== YANGILASH FUNKSIYASI ====================
+def start_updater(state: UserState):
+    """Foydalanuvchi uchun auto-update thread'ini ishga tushirish"""
+    if state.updater_thread and state.updater_thread.is_alive():
+        return
+    
+    def updater():
+        while state.updater_running:
+            try:
+                prices = get_prices()
+                if prices:
+                    msg = build_message(state, prices)
+                    try:
+                        bot.edit_message_text(
+                            msg, 
+                            state.chat_id, 
+                            state.message_id, 
+                            parse_mode="HTML"
+                        )
+                    except telebot.apihelper.ApiException as e:
+                        if "message is not modified" not in str(e):
+                            print(f"Xatolik: {e}")
+                    except Exception as e:
+                        print(f"Kutilmagan xato: {e}")
+            except Exception as e:
+                print(f"Updater xatosi: {e}")
+            
+            time.sleep(state.interval)
+    
+    state.updater_running = True
+    state.updater_thread = threading.Thread(target=updater, daemon=True)
+    state.updater_thread.start()
+
+def stop_updater(state: UserState):
+    """Foydalanuvchi uchun auto-update'ni to'xtatish"""
+    state.updater_running = False
+    if state.updater_thread:
+        state.updater_thread = None
+
+def restart_updater(state: UserState):
+    """Auto-update'ni qayta ishga tushirish"""
+    stop_updater(state)
+    start_updater(state)
+
+# ==================== MENU VA BUYRUQLAR ====================
+@bot.message_handler(commands=['start'])
+def start(message):
+    chat_id = message.chat.id
+    state = user_manager.get_state(chat_id)
+    
+    # Yangi xabar yuborish
+    prices = get_prices()
+    if not prices:
+        bot.send_message(chat_id, "⚠️ Narxlarni yuklashda xatolik. Qayta urinib ko'ring.")
+        return
+    
+    msg_text = build_message(state, prices)
+    sent = bot.send_message(chat_id, msg_text, parse_mode="HTML")
+    state.message_id = sent.message_id
+    
+    # Auto-updater'ni ishga tushirish
+    start_updater(state)
+    user_manager.save_data()
+    
+    # Foydalanuvchini kutib olish
+    bot.send_message(chat_id, 
+        "👋 <b>AlphaCryptoPrice botiga xush kelibsiz!</b>\n\n"
+        "💡 /menu - Barcha buyruqlarni ko'rish\n"
+        "⚙️ Sizning sozlamalaringiz avtomatik saqlanadi",
+        parse_mode="HTML")
+
+@bot.message_handler(commands=['menu'])
+def show_menu(message):
+    """Asosiy menyu"""
+    menu_text = """
+📋 <b>ALPHACRYPTOPRICE MENU</b>
+
+🪙 <b>Valyutalar</b>
+/add_coin - Yangi valyuta qo'shish
+/remove_coin - Valyuta olib tashlash
+/my_coins - Faol valyutalarim
+
+⚙️ <b>Sozlamalar</b>
+/set_interval - Yangilanish vaqtini o'zgartirish
+/stop_updates - Yangilanishlarni to'xtatish
+/start_updates - Yangilanishlarni qayta ishga tushirish
+
+ℹ️ <b>Ma'lumot</b>
+/status - Bot holati
+/help - Yordam
+"""
+    bot.send_message(message.chat.id, menu_text, parse_mode="HTML")
+
+@bot.message_handler(commands=['add_coin'])
+def add_coin(message):
+    """Yangi valyuta qo'shish (tasdiqlash bilan)"""
+    chat_id = message.chat.id
+    state = user_manager.get_state(chat_id)
+    
+    # Mavjud bo'lmagan valyutalar
+    available = [c for c in ALL_COINS.keys() if c not in state.active_coins]
+    
+    if not available:
+        bot.send_message(chat_id, "❌ Sizda barcha valyutalar faol! Olib tashlash uchun /remove_coin")
+        return
+    
+    available_list = "\n".join([f"• {c}" for c in available])
+    bot.send_message(chat_id, 
+        f"➕ <b>Yangi valyuta qo'shish</b>\n\n"
+        f"Mavjud valyutalar:\n{available_list}\n\n"
+        f"📝 Qaysi valyutani qo'shmoqchisiz? (Masalan: ADA)\n\n"
+        f"⚠️ <i>Bekor qilish uchun /cancel</i>",
+        parse_mode="HTML")
+    
+    state.waiting_for_coin = True
+
+@bot.message_handler(commands=['remove_coin'])
+def remove_coin(message):
+    """Valyuta olib tashlash"""
+    chat_id = message.chat.id
+    state = user_manager.get_state(chat_id)
+    
+    if len(state.active_coins) <= 1:
+        bot.send_message(chat_id, "❌ Kamida 1 ta valyuta faol bo'lishi kerak!")
+        return
+    
+    active_list = "\n".join([f"• {c}" for c in state.active_coins])
+    bot.send_message(chat_id,
+        f"➖ <b>Valyuta olib tashlash</b>\n\n"
+        f"Faol valyutalaringiz:\n{active_list}\n\n"
+        f"📝 Qaysi valyutani olib tashlamoqchisiz? (Masalan: DOGE)\n\n"
+        f"⚠️ <i>Bekor qilish uchun /cancel</i>",
+        parse_mode="HTML")
+    
+    state.waiting_for_coin = True
+    state.waiting_for_remove = True
+
+@bot.message_handler(commands=['my_coins'])
+def my_coins(message):
+    """Faol valyutalarni ko'rsatish"""
+    chat_id = message.chat.id
+    state = user_manager.get_state(chat_id)
+    
+    coins_list = "\n".join([f"🪙 {c}" for c in state.active_coins])
+    bot.send_message(chat_id,
+        f"📊 <b>Sizning faol valyutalaringiz ({len(state.active_coins)} ta)</b>\n\n"
+        f"{coins_list}",
+        parse_mode="HTML")
+
+@bot.message_handler(commands=['set_interval'])
+def set_interval(message):
+    """Yangilanish intervalini o'zgartirish"""
+    chat_id = message.chat.id
+    state = user_manager.get_state(chat_id)
+    
+    bot.send_message(chat_id,
+        f"⏱ <b>Yangilanish intervalini o'zgartirish</b>\n\n"
+        f"Hozirgi interval: {state.interval} sekund\n\n"
+        f"📝 Yangi intervalni soniyalarda kiriting (5-60):\n\n"
+        f"⚠️ <i>Bekor qilish uchun /cancel</i>",
+        parse_mode="HTML")
+    
+    state.waiting_for_interval = True
+
+@bot.message_handler(commands=['stop_updates'])
+def stop_updates(message):
+    """Yangilanishlarni to'xtatish"""
+    chat_id = message.chat.id
+    state = user_manager.get_state(chat_id)
+    
+    if not state.updater_running:
+        bot.send_message(chat_id, "⚠️ Yangilanishlar allaqachon to'xtatilgan!")
+        return
+    
+    stop_updater(state)
+    bot.send_message(chat_id, "⏸ Yangilanishlar to'xtatildi. /start_updates bilan qayta ishga tushiring.")
+
+@bot.message_handler(commands=['start_updates'])
+def start_updates(message):
+    """Yangilanishlarni qayta ishga tushirish"""
+    chat_id = message.chat.id
+    state = user_manager.get_state(chat_id)
+    
+    if state.updater_running:
+        bot.send_message(chat_id, "⚠️ Yangilanishlar allaqachon ishlamoqda!")
+        return
+    
+    start_updater(state)
+    bot.send_message(chat_id, "▶️ Yangilanishlar qayta ishga tushirildi!")
+
+@bot.message_handler(commands=['status'])
+def status(message):
+    """Bot holatini ko'rsatish"""
+    chat_id = message.chat.id
+    state = user_manager.get_state(chat_id)
+    
+    status_text = f"""
+📊 <b>BOT HOLATI</b>
+
+🪙 Faol valyutalar: {len(state.active_coins)} ta
+⏱ Yangilanish intervali: {state.interval} sek
+🔄 Yangilanish holati: {"✅ Faol" if state.updater_running else "⏸ To'xtatilgan"}
+📅 Bot ishga tushgan: <i>Doimiy</i>
+
+<b>Buyruqlar:</b>
+/menu - Asosiy menyu
+/help - Yordam
+"""
+    bot.send_message(chat_id, status_text, parse_mode="HTML")
+
+@bot.message_handler(commands=['help'])
+def help_command(message):
+    """Yordam xabari"""
+    help_text = """
+📚 <b>ALPHACRYPTOPRICE YORDAM</b>
+
+<b>🪙 Valyutalar bilan ishlash</b>
+/add_coin - Yangi valyuta qo'shish (tasdiqlash bilan)
+/remove_coin - Valyuta olib tashlash
+/my_coins - Faol valyutalarni ko'rish
+
+<b>⚙️ Sozlamalar</b>
+/set_interval - Yangilanish vaqtini o'zgartirish (5-60 sek)
+/stop_updates - Yangilanishlarni vaqtincha to'xtatish
+/start_updates - Yangilanishlarni qayta ishga tushirish
+
+<b>ℹ️ Ma'lumot</b>
+/menu - Asosiy menyu
+/status - Bot holati
+/help - Bu yordam xabari
+
+<b>❗ Muhim:</b>
+• Har qanday valyuta qo'shish yoki olib tashlashdan oldin tasdiqlash so'raladi
+• Sozlamalaringiz avtomatik saqlanadi
+• Kamida 1 ta valyuta faol bo'lishi kerak
+"""
+    bot.send_message(message.chat.id, help_text, parse_mode="HTML")
+
+@bot.message_handler(commands=['cancel'])
+def cancel(message):
+    """Joriy amalni bekor qilish"""
+    chat_id = message.chat.id
+    state = user_manager.get_state(chat_id)
+    
+    state.waiting_for_coin = False
+    state.waiting_for_interval = False
+    if hasattr(state, 'waiting_for_remove'):
+        state.waiting_for_remove = False
+    
+    bot.send_message(chat_id, "❌ Amal bekor qilindi. /menu orqali davom eting.")
+
+# ==================== MATNLI XABARLARNI QAYTA ISHLASH ====================
+@bot.message_handler(func=lambda message: True)
+def handle_text(message):
+    """Foydalanuvchi kiritgan matnni qayta ishlash"""
+    chat_id = message.chat.id
+    state = user_manager.get_state(chat_id)
+    text = message.text.upper().strip()
+    
+    # Interval o'zgartirish
+    if state.waiting_for_interval:
+        try:
+            new_interval = int(text)
+            if 5 <= new_interval <= 60:
+                # Tasdiqlash so'rash
+                bot.send_message(chat_id, 
+                    f"⏱ Intervalni {new_interval} sekundga o'zgartirilsinmi?\n\n"
+                    f"✅ Ha deb tasdiqlang yoki /cancel")
+                
+                state.waiting_for_interval = False
+                state.pending_interval = new_interval
+                state.waiting_for_confirm = True
+            else:
+                bot.send_message(chat_id, "❌ Interval 5-60 sekund orasida bo'lishi kerak!")
+        except ValueError:
+            bot.send_message(chat_id, "❌ Iltimos, faqat son kiriting!")
+        return
+    
+    # Tasdiqlash
+    if hasattr(state, 'waiting_for_confirm') and state.waiting_for_confirm:
+        if text == "HA":
+            if hasattr(state, 'pending_interval'):
+                old_interval = state.interval
+                state.interval = state.pending_interval
+                restart_updater(state)
+                user_manager.save_data()
+                bot.send_message(chat_id, f"✅ Interval {old_interval} → {state.interval} sekundga o'zgartirildi!")
+                delattr(state, 'pending_interval')
+            elif hasattr(state, 'pending_coin'):
+                if state.pending_coin in ALL_COINS:
+                    state.active_coins.append(state.pending_coin)
+                    restart_updater(state)
+                    user_manager.save_data()
+                    bot.send_message(chat_id, f"✅ {state.pending_coin} muvaffaqiyatli qo'shildi!")
+                delattr(state, 'pending_coin')
+            elif hasattr(state, 'pending_remove_coin'):
+                if state.pending_remove_coin in state.active_coins:
+                    state.active_coins.remove(state.pending_remove_coin)
+                    restart_updater(state)
+                    user_manager.save_data()
+                    bot.send_message(chat_id, f"✅ {state.pending_remove_coin} olib tashlandi!")
+                delattr(state, 'pending_remove_coin')
+            state.waiting_for_confirm = False
+        else:
+            bot.send_message(chat_id, "❌ Amal bekor qilindi.")
+            state.waiting_for_confirm = False
+        return
+    
+    # Valyuta qo'shish yoki olib tashlash
+    if state.waiting_for_coin:
+        if text in ALL_COINS:
+            if hasattr(state, 'waiting_for_remove') and state.waiting_for_remove:
+                if text in state.active_coins:
+                    if len(state.active_coins) <= 1:
+                        bot.send_message(chat_id, "❌ Kamida 1 ta valyuta qolishi kerak!")
+                    else:
+                        # Tasdiqlash so'rash
+                        bot.send_message(chat_id, 
+                            f"❓ {text} ni olib tashlansinmi?\n\n"
+                            f"✅ Ha deb yozing yoki /cancel")
+                        state.waiting_for_coin = False
+                        state.waiting_for_remove = False
+                        state.pending_remove_coin = text
+                        state.waiting_for_confirm = True
+                else:
+                    bot.send_message(chat_id, f"❌ {text} sizning faol valyutalaringizda yo'q!")
+            else:
+                if text in state.active_coins:
+                    bot.send_message(chat_id, f"⚠️ {text} allaqachon faol!")
+                else:
+                    # Tasdiqlash so'rash
+                    bot.send_message(chat_id, 
+                        f"❓ {text} ni qo'shilsinmi?\n\n"
+                        f"✅ Ha deb yozing yoki /cancel")
+                    state.waiting_for_coin = False
+                    state.pending_coin = text
+                    state.waiting_for_confirm = True
+        else:
+            bot.send_message(chat_id, 
+                f"❌ '{text}' noto'g'ri valyuta!\n\n"
+                f"Mavjud valyutalar: {', '.join(ALL_COINS.keys())}")
         return
 
-    data = await state.get_data()
-    rate = data["rate"]
-    uzs = amount * rate * 12000  # taxminiy UZS (1 USD = 12000 so'm)
-
-    await state.update_data(amount=amount)
-    await state.set_state(OrderState.enter_wallet)
-
-    dir_code = data.get("dir_code")
-    if dir_code == "buy":
-        await message.answer(
-            f"💰 Miqdor: <b>${amount:,}</b>\n"
-            f"💵 To'lash kerak: <b>~{uzs:,.0f} so'm</b>\n\n"
-            f"📬 <b>Crypto wallet manzilingizni kiriting:</b>",
-            parse_mode="HTML"
-        )
-    else:
-        await message.answer(
-            f"💰 Miqdor: <b>${amount:,}</b>\n"
-            f"💵 Olasiz: <b>~{uzs:,.0f} so'm</b>\n\n"
-            f"🏦 <b>Pul qabul qiladigan karta yoki hisobingizni kiriting:</b>",
-            parse_mode="HTML"
-        )
-
-@dp.message(OrderState.enter_wallet)
-async def enter_wallet(message: types.Message, state: FSMContext):
-    await state.update_data(wallet=message.text)
-    await state.set_state(OrderState.upload_receipt)
-    await message.answer(
-        "📸 <b>To'lov chekini (screenshot) yuboring:</b>",
-        parse_mode="HTML",
-        reply_markup=ReplyKeyboardRemove()
-    )
-
-@dp.message(OrderState.upload_receipt, F.photo)
-async def upload_receipt(message: types.Message, state: FSMContext):
-    global order_counter
-    order_counter += 1
-    order_id = order_counter
-
-    data = await state.get_data()
-    user = message.from_user
-    photo_id = message.photo[-1].file_id
-    now = datetime.now().strftime("%d.%m.%Y %H:%M")
-
-    order = {
-        "id": order_id,
-        "user_id": user.id,
-        "username": user.username or "N/A",
-        "full_name": user.full_name,
-        "direction": data["direction"],
-        "crypto": data["crypto"],
-        "amount": data["amount"],
-        "rate": data["rate"],
-        "wallet": data["wallet"],
-        "photo_id": photo_id,
-        "status": "pending",
-        "date": now,
-        "chat_id": message.chat.id,
-    }
-    orders[order_id] = order
-    await state.clear()
-
-    # Foydalanuvchiga tasdiqlash
-    await message.answer(
-        f"✅ <b>Zayavkangiz qabul qilindi!</b>\n\n"
-        f"🔢 Zayavka raqami: <b>#{order_id}</b>\n"
-        f"💱 {data['direction']}\n"
-        f"🪙 {data['crypto']} — ${data['amount']:,}\n"
-        f"📅 {now}\n\n"
-        f"⏳ Admin ko'rib chiqadi va javob beradi.",
-        parse_mode="HTML",
-        reply_markup=main_menu()
-    )
-
-    # Admin xabari
-    admin_text = (
-        f"🔔 <b>Yangi zayavka #{order_id}</b>\n\n"
-        f"👤 Foydalanuvchi: {user.full_name} (@{user.username or 'N/A'})\n"
-        f"🆔 ID: <code>{user.id}</code>\n"
-        f"💱 Yo'nalish: {data['direction']}\n"
-        f"🪙 Crypto: {data['crypto']}\n"
-        f"💰 Miqdor: ${data['amount']:,}\n"
-        f"💵 Kurs: ${data['rate']:,}\n"
-        f"📬 Wallet/Karta: <code>{data['wallet']}</code>\n"
-        f"📅 Sana: {now}"
-    )
-
-    # Admin shaxsiy chatga
-    await bot.send_photo(
-        chat_id=ADMIN_CHAT_ID,
-        photo=photo_id,
-        caption=admin_text,
-        parse_mode="HTML",
-        reply_markup=admin_order_kb(order_id)
-    )
-
-    # Admin kanalga
-    await bot.send_photo(
-        chat_id=ADMIN_CHANNEL_ID,
-        photo=photo_id,
-        caption=admin_text,
-        parse_mode="HTML",
-        reply_markup=admin_order_kb(order_id)
-    )
-
-@dp.message(OrderState.upload_receipt)
-async def receipt_not_photo(message: types.Message):
-    await message.answer("❗ Iltimos, rasm (screenshot) yuboring.")
-
-
-# ========== ADMIN ACCEPT / REJECT ==========
-
-@dp.callback_query(F.data.startswith("admin_accept_"))
-async def admin_accept(callback: types.CallbackQuery):
-    order_id = int(callback.data.split("_")[2])
-    order = orders.get(order_id)
-    if not order:
-        await callback.answer("Zayavka topilmadi!", show_alert=True)
-        return
-    if order["status"] != "pending":
-        await callback.answer("Bu zayavka allaqachon ko'rib chiqilgan!", show_alert=True)
-        return
-
-    order["status"] = "accepted"
-
-    await callback.answer("✅ Qabul qilindi!")
-    await callback.message.edit_caption(
-        caption=callback.message.caption + "\n\n✅ <b>ACCEPTED</b> by admin",
-        parse_mode="HTML"
-    )
-
-    # Foydalanuvchiga xabar
-    await bot.send_message(
-        chat_id=order["chat_id"],
-        text=(
-            f"✅ <b>Zayavkangiz qabul qilindi!</b>\n\n"
-            f"🔢 Zayavka: <b>#{order_id}</b>\n"
-            f"💱 {order['direction']} | {order['crypto']} — ${order['amount']:,}\n\n"
-            f"💬 Tez orada admin siz bilan bog'lanadi."
-        ),
-        parse_mode="HTML"
-    )
-
-
-@dp.callback_query(F.data.startswith("admin_reject_"))
-async def admin_reject(callback: types.CallbackQuery):
-    order_id = int(callback.data.split("_")[2])
-    order = orders.get(order_id)
-    if not order:
-        await callback.answer("Zayavka topilmadi!", show_alert=True)
-        return
-    if order["status"] != "pending":
-        await callback.answer("Bu zayavka allaqachon ko'rib chiqilgan!", show_alert=True)
-        return
-
-    order["status"] = "rejected"
-
-    await callback.answer("❌ Rad etildi!")
-    await callback.message.edit_caption(
-        caption=callback.message.caption + "\n\n❌ <b>REJECTED</b> by admin",
-        parse_mode="HTML"
-    )
-
-    # Foydalanuvchiga xabar
-    await bot.send_message(
-        chat_id=order["chat_id"],
-        text=(
-            f"❌ <b>Zayavkangiz rad etildi.</b>\n\n"
-            f"🔢 Zayavka: <b>#{order_id}</b>\n"
-            f"💱 {order['direction']} | {order['crypto']} — ${order['amount']:,}\n\n"
-            f"❓ Savollar uchun adminga murojaat qiling."
-        ),
-        parse_mode="HTML"
-    )
-
-
-async def main():
-    logger.info("Bot starting...")
-    await dp.start_polling(bot)
-
-
+# ==================== BOTNI ISHGA TUSHIRISH ====================
 if __name__ == "__main__":
-    asyncio.run(main())
+    print("🚀 AlphaCryptoPrice bot ishga tushdi...")
+    print(f"📊 {len(ALL_COINS)} ta valyuta mavjud")
+    print("⚙️ Bot ishlayapti...")
+    
+    try:
+        bot.infinity_polling(timeout=10)
+    except KeyboardInterrupt:
+        print("\n👋 Bot to'xtatildi")
+    except Exception as e:
+        print(f"❌ Bot xatosi: {e}")
