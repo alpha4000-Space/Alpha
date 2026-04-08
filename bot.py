@@ -1,34 +1,34 @@
-# AlphaCoderXBot - Telegram + Claude API bot
+# bot.py - AlphaCoderXBot
 # Python 3.10+ kerak
 
 from telegram import Update, InputFile
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.ext import Updater, CommandHandler, MessageHandler, filters, CallbackContext
 import requests
 import os
 
-# Telegram va Claude API tokenlarini environment variables dan oling
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # Railway Environment Variable
-CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")      # Railway Environment Variable
+# Environment Variables
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # BotFather token
+CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")      # Claude API token
 
-CLAUDE_API_URL = "https://api.anthropic.com/v1/complete"  # Claude API endpoint
+CLAUDE_API_URL = "https://api.anthropic.com/v1/complete"
 
 # Foydalanuvchi xabarlarini qabul qilish
 def handle_message(update: Update, context: CallbackContext):
     text = update.message.text
 
-    # Agar foydalanuvchi "kim yaratgan?" desа
+    # "Kim yaratgan?" ga javob
     if "kim yaratgan" in text.lower():
         update.message.reply_text("AlphaCoder yaratgan 😎")
         return
 
-    # Kod yozish uchun trigger: foydalanuvchi "kod" so'zini yozsa
+    # Kod yozish trigger
     if "kod" in text.lower():
         update.message.reply_text("Kod generatsiya qilinyapti, biroz kuting...")
         prompt = f"Foydalanuvchi so‘radi: {text}\nKod yozing:"
-        max_tokens = 2000  # uzun kod uchun token limitini oshirish mumkin
+        max_tokens = 2000  # Uzun kod uchun limit
         generate_and_send_code(update, prompt, max_tokens)
     else:
-        # Umumiy savollarga Claude API javob beradi
+        # Oddiy savollarga javob
         prompt = f"Foydalanuvchi so‘radi: {text}\nJavob ber:"
         max_tokens = 500
         generate_and_send_text(update, prompt, max_tokens)
@@ -62,7 +62,7 @@ def generate_and_send_code(update: Update, prompt, max_tokens):
     except Exception as e:
         update.message.reply_text(f"Xatolik yuz berdi: {str(e)}")
 
-# Umumiy savollarga javob berish
+# Oddiy savollarga javob
 def generate_and_send_text(update: Update, prompt, max_tokens):
     try:
         headers = {
@@ -98,10 +98,4 @@ def main():
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-
-    updater.start_polling()
-    updater.idle()
-
-if __name__ == "__main__":
-    main()
+    dp.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
