@@ -37,6 +37,9 @@ class WithdrawState(StatesGroup):
 class BroadcastState(StatesGroup):
     waiting_message = State()
 
+class SettingsState(StatesGroup):
+    edit_refbonus = State()
+
 # Admin: crypto qo'shish
 class AddCryptoState(StatesGroup):
     symbol = State()
@@ -516,5 +519,4 @@ async def info(message: types.Message):
 
 # ==================== ADMIN PANEL ====================
 @dp.message(Command("admin"))
-async def admin_panel(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADM
+async def admin_panel(message: types.Mess
